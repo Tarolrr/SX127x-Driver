@@ -6,9 +6,11 @@
 #include <string.h>
 #include <stdlib.h>
 #include "pin_description.h"
-#include "stm32f1xx_hal.h"
-#include "cmsis_os.h"
 #include "GUID.h"
+#include "external_Decl.h"
+#include "stm32f1xx_hal_gpio.h"
+#include "stm32f1xx_hal_spi.h"
+
 
 #define LoRaMaxMessageLength 25
 #define LoRaAddressCount 6
