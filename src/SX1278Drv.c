@@ -11,11 +11,34 @@ osMessageQId hLoRaSendQueue;
 volatile bool pendingSuspend;
 volatile bool isBusy;
 bool lastCAD = true;
-static uint32_t	SX1278Drv_GetSymbolLengthInUs();
-static uint8_t SX1278Drv_SPIRead(uint8_t adr);
-static void SX1278Drv_SPIWrite(uint8_t adr, uint8_t data);
-static void SX1278Drv_SPIBurstRead(uint8_t adr, uint8_t *ptr, uint8_t length);
-static void SX1278Drv_SPIBurstWrite(uint8_t adr, uint8_t *ptr, uint8_t length);
+
+static void			SX1278Drv_LoRaServiceTaskFxn(void const * argument);
+static bool 		SX1278Drv_checkGUID(uint8_t *buf);
+static uint8_t		SX1278Drv_GetOpMode(void);
+static void 		SX1278Drv_SetOpMode(uint8_t mode);
+static void 		SX1278Drv_EntryLoRa(void);
+static void			SX1278Drv_SetFrequency(double frequency);
+static void 		SX1278Drv_ClearIrq(void);
+static bool 		SX1278Drv_LoRaEntryRx(void);
+static uint8_t 		SX1278Drv_LoRaRxPacket(uint8_t *buf, uint32_t timeoutMs);
+static uint8_t 		SX1278Drv_LoRaEntryTx(void);
+static bool 		SX1278Drv_LoRaTxPacket(uint8_t *buf, uint8_t size);
+static uint32_t		SX1278Drv_GetSymbolLengthInUs();
+static uint32_t 	SX1278Drv_GetMessageDurationMs(uint8_t payloadLength);
+static uint8_t		SX1278Drv_SPIRead(uint8_t adr);
+static void			SX1278Drv_SPIWrite(uint8_t adr, uint8_t data);
+static void 		SX1278Drv_SPIBurstRead(uint8_t adr, uint8_t *ptr, uint8_t length);
+static void 		SX1278Drv_SPIBurstWrite(uint8_t adr, uint8_t *ptr, uint8_t length);
+
+bool SX1278Drv_checkGUID(uint8_t *buf){
+	uint8_t idx;
+	for(idx = 0; idx < 16; idx++){
+		if(buf[idx] != ((uint8_t *)GUID)[idx])
+			return false;
+	}
+	return true;
+}
+
 
 bool SX1278Drv_GetCADResult(void){
 	while(!(SX1278Drv_SPIRead(SX1278Drv_RegLoRaIrqFlags)&SX1278Drv_RegLoRaIrqFlags_CadDone));
@@ -108,59 +131,7 @@ bool SX1278Drv_LoRaEntryRx(void){
 	}
 }
 
-uint8_t SX1278Drv_LoRaRxPacket(uint8_t *buf, uint32_t timeoutMs){
-	uint8_t IrqFlags;
-	uint8_t size;
-	uint32_t timer = HAL_GetTick();
-	if(SX1278Drv_LoRaCfg->rx_led)
-		GPIO_PIN_RESET(SX1278Drv_LoRaCfg->rx_led);
-	do{
-		IrqFlags = SX1278Drv_SPIRead(SX1278Drv_RegLoRaIrqFlags);
-		if(IrqFlags & SX1278Drv_RegLoRaIrqFlags_RxDone){
-			if((SX1278Drv_LoRaCfg->crc == SX1278Drv_RegLoRaModemConfig2_PayloadCrc_ON) &&
-				(IrqFlags & SX1278Drv_RegLoRaIrqFlags_PayloadCrcError))
-				return 0;
 
-			SX1278Drv_SPIWrite(SX1278Drv_RegLoRaFifoAddrPtr,0); //RxBaseAddr -> FiFoAddrPtr
-			size = SX1278Drv_SPIRead(SX1278Drv_RegLoRaRxNbBytes);
-			SX1278Drv_SPIBurstRead(0x00, buf, size);
-			SX1278Drv_ClearIrq();
-			if(SX1278Drv_LoRaCfg->rx_led)
-				GPIO_PIN_SET(SX1278Drv_LoRaCfg->rx_led);
-			return size;
-		}
-	} while(HAL_GetTick() - timer < timeoutMs);
-	SX1278Drv_ClearIrq();
-	if(SX1278Drv_LoRaCfg->rx_led)
-		GPIO_PIN_SET(SX1278Drv_LoRaCfg->rx_led);
-	return 0;
-}
-
-uint8_t SX1278Drv_LoRaEntryTx(void){
-	SX1278Drv_ClearIrq();
-	return 1;
-}
-
-bool SX1278Drv_LoRaTxPacket(uint8_t *buf, uint8_t size){
-	uint8_t IrqFlags;
-	if(SX1278Drv_LoRaCfg->tx_led)
-		GPIO_PIN_RESET(SX1278Drv_LoRaCfg->tx_led);
-	SX1278Drv_SPIWrite(SX1278Drv_RegLoRaFifoAddrPtr, 0);
-	SX1278Drv_SPIWrite(SX1278Drv_RegLoRaPayloadLength,size);
-	SX1278Drv_SPIBurstWrite(0x00, buf, size);
-	SX1278Drv_SetOpMode(SX1278Drv_RegOpMode_TX);
-	while(1){
-		IrqFlags = SX1278Drv_SPIRead(SX1278Drv_RegLoRaIrqFlags);
-		if(IrqFlags & 0x08){                      //Packet sent
-			SX1278Drv_SPIRead(SX1278Drv_RegLoRaIrqFlags);
-			SX1278Drv_ClearIrq();
-			if(SX1278Drv_LoRaCfg->tx_led)
-				GPIO_PIN_SET(SX1278Drv_LoRaCfg->tx_led);
-			return true;
-		}
-	}
-
-}
 
 void SX1278Drv_Init(SX1278Drv_LoRaConfiguration *cfg){
 
@@ -273,37 +244,7 @@ static uint32_t	SX1278Drv_GetSymbolLengthInUs(){
 	return (1000000*((uint64_t)1<<(SX1278Drv_LoRaCfg->sf>>4)))/SX1278Drv_RegLoRaModemConfig1_BW_Values[(SX1278Drv_LoRaCfg->bw>>4)];
 }
 
-static uint8_t SX1278Drv_SPIRead(uint8_t adr){
-	uint8_t res;
-	GPIO_PIN_RESET(SX1278Drv_LoRaCfg->spi_css_pin);
-	HAL_SPI_Transmit(SX1278Drv_LoRaCfg->spi,&adr,1,-1);
-	HAL_SPI_Receive(SX1278Drv_LoRaCfg->spi,&res,1,-1);
-	GPIO_PIN_SET(SX1278Drv_LoRaCfg->spi_css_pin);
-	return res;
-}
 
-static void SX1278Drv_SPIWrite(uint8_t adr, uint8_t data){
-	adr |= 0x80;
-	GPIO_PIN_RESET(SX1278Drv_LoRaCfg->spi_css_pin);
-	HAL_SPI_Transmit(SX1278Drv_LoRaCfg->spi,&adr,1,-1);
-	HAL_SPI_Transmit(SX1278Drv_LoRaCfg->spi,&data,1,-1);
-	GPIO_PIN_SET(SX1278Drv_LoRaCfg->spi_css_pin);
-}
-
-static void SX1278Drv_SPIBurstRead(uint8_t adr, uint8_t *ptr, uint8_t length){
-	GPIO_PIN_RESET(SX1278Drv_LoRaCfg->spi_css_pin);
-	HAL_SPI_Transmit(SX1278Drv_LoRaCfg->spi,&adr,1,-1);
-	HAL_SPI_Receive(SX1278Drv_LoRaCfg->spi,ptr,length,-1);
-	GPIO_PIN_SET(SX1278Drv_LoRaCfg->spi_css_pin);
-}
-
-static void SX1278Drv_SPIBurstWrite(uint8_t adr, uint8_t *ptr, uint8_t length){
-	adr |= 0x80;
-	GPIO_PIN_RESET(SX1278Drv_LoRaCfg->spi_css_pin);
-	HAL_SPI_Transmit(SX1278Drv_LoRaCfg->spi,&adr,1,-1);
-	HAL_SPI_Transmit(SX1278Drv_LoRaCfg->spi,ptr,length,-1);
-	GPIO_PIN_SET(SX1278Drv_LoRaCfg->spi_css_pin);
-}
 
 /*void SX1278Drv_GetRegDump(UART_HandleTypeDef *huart){
 	uint8_t buf[0x6f];
@@ -361,7 +302,7 @@ void SX1278Drv_LoRaServiceTaskFxn(void const * argument){
 					if(rxSize < (LoRaGUIDSize + LoRaNetworkIDSize + LoRaAddressSize + LoRaAddressSize))
 						continue;
 
-					if(!checkGUID(LoRaRxData))
+					if(!SX1278Drv_checkGUID(LoRaRxData))
 						continue;
 
 					if(LoRaRxData[LoRaGUIDSize] != NetworkID)
@@ -466,6 +407,97 @@ bool SX1278Drv_IsBusy(){
 uint16_t SX1278Drv_GetRandomDelay(uint16_t from, uint16_t to){
 	return from + rand()%(to-from);
 }
+
+/*******LoRa*******/
+
+uint8_t SX1278Drv_LoRaRxPacket(uint8_t *buf, uint32_t timeoutMs){
+	uint8_t IrqFlags;
+	uint8_t size;
+	uint32_t timer = HAL_GetTick();
+	if(SX1278Drv_LoRaCfg->rx_led)
+		GPIO_PIN_RESET(SX1278Drv_LoRaCfg->rx_led);
+	do{
+		IrqFlags = SX1278Drv_SPIRead(SX1278Drv_RegLoRaIrqFlags);
+		if(IrqFlags & SX1278Drv_RegLoRaIrqFlags_RxDone){
+			if((SX1278Drv_LoRaCfg->crc == SX1278Drv_RegLoRaModemConfig2_PayloadCrc_ON) &&
+				(IrqFlags & SX1278Drv_RegLoRaIrqFlags_PayloadCrcError))
+				return 0;
+
+			SX1278Drv_SPIWrite(SX1278Drv_RegLoRaFifoAddrPtr,0); //RxBaseAddr -> FiFoAddrPtr
+			size = SX1278Drv_SPIRead(SX1278Drv_RegLoRaRxNbBytes);
+			SX1278Drv_SPIBurstRead(0x00, buf, size);
+			SX1278Drv_ClearIrq();
+			if(SX1278Drv_LoRaCfg->rx_led)
+				GPIO_PIN_SET(SX1278Drv_LoRaCfg->rx_led);
+			return size;
+		}
+	} while(HAL_GetTick() - timer < timeoutMs);
+	SX1278Drv_ClearIrq();
+	if(SX1278Drv_LoRaCfg->rx_led)
+		GPIO_PIN_SET(SX1278Drv_LoRaCfg->rx_led);
+	return 0;
+}
+
+uint8_t SX1278Drv_LoRaEntryTx(void){
+	SX1278Drv_ClearIrq();
+	return 1;
+}
+
+bool SX1278Drv_LoRaTxPacket(uint8_t *buf, uint8_t size){
+	uint8_t IrqFlags;
+	if(SX1278Drv_LoRaCfg->tx_led)
+		GPIO_PIN_RESET(SX1278Drv_LoRaCfg->tx_led);
+	SX1278Drv_SPIWrite(SX1278Drv_RegLoRaFifoAddrPtr, 0);
+	SX1278Drv_SPIWrite(SX1278Drv_RegLoRaPayloadLength,size);
+	SX1278Drv_SPIBurstWrite(0x00, buf, size);
+	SX1278Drv_SetOpMode(SX1278Drv_RegOpMode_TX);
+	while(1){
+		IrqFlags = SX1278Drv_SPIRead(SX1278Drv_RegLoRaIrqFlags);
+		if(IrqFlags & 0x08){                      //Packet sent
+			SX1278Drv_SPIRead(SX1278Drv_RegLoRaIrqFlags);
+			SX1278Drv_ClearIrq();
+			if(SX1278Drv_LoRaCfg->tx_led)
+				GPIO_PIN_SET(SX1278Drv_LoRaCfg->tx_led);
+			return true;
+		}
+	}
+}
+
+/***********SPI functions************/
+
+static uint8_t SX1278Drv_SPIRead(uint8_t adr){
+	uint8_t res;
+	GPIO_PIN_RESET(SX1278Drv_LoRaCfg->spi_css_pin);
+	HAL_SPI_Transmit(SX1278Drv_LoRaCfg->spi,&adr,1,-1);
+	HAL_SPI_Receive(SX1278Drv_LoRaCfg->spi,&res,1,-1);
+	GPIO_PIN_SET(SX1278Drv_LoRaCfg->spi_css_pin);
+	return res;
+}
+
+static void SX1278Drv_SPIWrite(uint8_t adr, uint8_t data){
+	adr |= 0x80;
+	GPIO_PIN_RESET(SX1278Drv_LoRaCfg->spi_css_pin);
+	HAL_SPI_Transmit(SX1278Drv_LoRaCfg->spi,&adr,1,-1);
+	HAL_SPI_Transmit(SX1278Drv_LoRaCfg->spi,&data,1,-1);
+	GPIO_PIN_SET(SX1278Drv_LoRaCfg->spi_css_pin);
+}
+
+static void SX1278Drv_SPIBurstRead(uint8_t adr, uint8_t *ptr, uint8_t length){
+	GPIO_PIN_RESET(SX1278Drv_LoRaCfg->spi_css_pin);
+	HAL_SPI_Transmit(SX1278Drv_LoRaCfg->spi,&adr,1,-1);
+	HAL_SPI_Receive(SX1278Drv_LoRaCfg->spi,ptr,length,-1);
+	GPIO_PIN_SET(SX1278Drv_LoRaCfg->spi_css_pin);
+}
+
+static void SX1278Drv_SPIBurstWrite(uint8_t adr, uint8_t *ptr, uint8_t length){
+	adr |= 0x80;
+	GPIO_PIN_RESET(SX1278Drv_LoRaCfg->spi_css_pin);
+	HAL_SPI_Transmit(SX1278Drv_LoRaCfg->spi,&adr,1,-1);
+	HAL_SPI_Transmit(SX1278Drv_LoRaCfg->spi,ptr,length,-1);
+	GPIO_PIN_SET(SX1278Drv_LoRaCfg->spi_css_pin);
+}
+
+/*********Callbacks************/
 
 __weak void SX1278Drv_LoRaRxCallback(LoRa_Message *msg){
 	 UNUSED(msg);
